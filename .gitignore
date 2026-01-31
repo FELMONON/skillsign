@@ -1,0 +1,25 @@
+# Private keys — NEVER commit these
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Signature artifacts (generated per-folder, not part of the tool itself)
+.skillsig/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
