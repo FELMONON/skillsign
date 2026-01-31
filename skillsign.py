@@ -9,6 +9,8 @@ Usage:
   skillsign trust <pubkey-file>                Add a public key to trusted authors
   skillsign trusted                            List trusted public keys
   skillsign chain <folder>                     Show the full isnad (provenance chain)
+  skillsign revoke [--key KEYFILE] [--reason]  Revoke a signing key
+  skillsign revoked                            List all revoked keys
 
 The signature covers every file in the folder (excluding .skillsig/).
 A .skillsig/ directory is created inside the skill folder containing:
@@ -39,6 +41,7 @@ except ImportError:
 SKILLSIG_DIR = ".skillsig"
 TRUST_DIR = Path.home() / ".skillsign" / "trusted"
 KEYS_DIR = Path.home() / ".skillsign" / "keys"
+REVOKED_DIR = Path.home() / ".skillsign" / "revoked"
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────
@@ -269,14 +272,27 @@ def cmd_verify(args):
         print(f"❌ INVALID SIGNATURE — manifest matches but signature is forged.")
         sys.exit(1)
 
-    # Check trust
+    # Check revocation
     fp = signer["fingerprint"]
+    revoked, rev_info = is_revoked_at(fp, signer.get("signed_at", ""))
+    if revoked:
+        print(f"🔴 REVOKED — Signer {fp} was revoked.")
+        print(f"   Revoked at: {rev_info['revoked_at']}")
+        print(f"   Reason: {rev_info['reason']}")
+        print(f"   Signed at: {signer.get('signed_at', 'unknown')}")
+        print(f"   Signatures after revocation are not trustworthy.")
+        sys.exit(1)
+
+    # Check trust
     trusted = is_trusted(fp)
     trust_label = "TRUSTED" if trusted else "UNTRUSTED"
 
     print(f"✅ Verified — {len(stored_manifest)} files intact.")
     print(f"   Signer: {fp} [{trust_label}]")
     print(f"   Signed at: {signer['signed_at']}")
+
+    if rev_info and not revoked:
+        print(f"   ⚠️  Signer was later revoked ({rev_info['revoked_at']}), but this signature predates revocation.")
 
     if not trusted:
         print(f"\n   ⚠️  Signer is not in your trusted authors list.")
@@ -381,6 +397,103 @@ def is_trusted(fingerprint: str) -> bool:
     return (TRUST_DIR / f"{fingerprint}.pub").exists()
 
 
+def get_revocation(fingerprint: str) -> dict | None:
+    """Return revocation info for a fingerprint, or None if not revoked."""
+    revoke_path = REVOKED_DIR / f"{fingerprint}.json"
+    if not revoke_path.exists():
+        return None
+    with open(revoke_path) as f:
+        return json.load(f)
+
+
+def is_revoked_at(fingerprint: str, signed_at: str) -> tuple[bool, dict | None]:
+    """Check if a key was revoked at the time of signing.
+    Returns (is_revoked, revocation_info)."""
+    rev = get_revocation(fingerprint)
+    if rev is None:
+        return False, None
+    # If signed_at is after revocation timestamp, the signature is invalid
+    return signed_at >= rev["revoked_at"], rev
+
+
+def cmd_revoke(args):
+    """Revoke a signing key."""
+    # Find the private key to create a self-signed revocation
+    if args.key:
+        keyfile = Path(args.key)
+    else:
+        keyfile = get_default_key()
+    if not keyfile or not keyfile.exists():
+        print("Error: No private key found. Provide --key or run 'skillsign keygen' first.")
+        sys.exit(1)
+
+    private_key = load_private_key(keyfile)
+    public_key = private_key.public_key()
+    fp = pubkey_fingerprint(public_key)
+
+    # Check if already revoked
+    if get_revocation(fp) is not None:
+        print(f"Key {fp} is already revoked.")
+        sys.exit(1)
+
+    reason = args.reason or "Key compromised"
+    revoked_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    # Create revocation statement
+    revocation = {
+        "fingerprint": fp,
+        "revoked_at": revoked_at,
+        "reason": reason,
+        "tool": "skillsign v1.1.0",
+    }
+
+    # Sign the revocation statement with the key being revoked (proof of ownership)
+    rev_bytes = json.dumps(revocation, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    signature = private_key.sign(rev_bytes)
+
+    revocation["signature"] = signature.hex()
+    revocation["public_key"] = public_key.public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+
+    # Store revocation
+    REVOKED_DIR.mkdir(parents=True, exist_ok=True)
+    with open(REVOKED_DIR / f"{fp}.json", "w") as f:
+        json.dump(revocation, f, indent=2)
+
+    # Remove from trusted if present
+    trusted_path = TRUST_DIR / f"{fp}.pub"
+    if trusted_path.exists():
+        trusted_path.unlink()
+        print(f"   Removed from trusted authors.")
+
+    print(f"🔴 Revoked: {fp}")
+    print(f"   Reason: {reason}")
+    print(f"   Time: {revoked_at}")
+    print(f"   Signatures made after this timestamp will fail verification.")
+
+
+def cmd_revoked(args):
+    """List all revoked keys."""
+    if not REVOKED_DIR.exists():
+        print("No revoked keys.")
+        return
+
+    revs = list(REVOKED_DIR.glob("*.json"))
+    if not revs:
+        print("No revoked keys.")
+        return
+
+    print(f"=== Revoked Keys ({len(revs)}) ===")
+    for r in sorted(revs):
+        with open(r) as f:
+            rev = json.load(f)
+        print(f"  {rev['fingerprint']}")
+        print(f"    Revoked: {rev['revoked_at']}")
+        print(f"    Reason:  {rev['reason']}")
+
+
 # ─── Main ──────────────────────────────────────────────────────────────────
 
 def main():
@@ -418,6 +531,14 @@ def main():
     p_chain = sub.add_parser("chain", help="Show the full isnād (provenance chain)")
     p_chain.add_argument("folder", help="Path to the skill folder")
 
+    # revoke
+    p_revoke = sub.add_parser("revoke", help="Revoke a signing key")
+    p_revoke.add_argument("--key", help="Path to private key to revoke")
+    p_revoke.add_argument("--reason", default="Key compromised", help="Reason for revocation")
+
+    # revoked
+    sub.add_parser("revoked", help="List all revoked keys")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -431,6 +552,8 @@ def main():
         "trust": cmd_trust,
         "trusted": cmd_trusted,
         "chain": cmd_chain,
+        "revoke": cmd_revoke,
+        "revoked": cmd_revoked,
     }
     commands[args.command](args)
 
