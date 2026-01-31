@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="skillsign",
-    version="1.0.0",
+    version="1.1.0",
     description="Sign and verify agent skill folders with ed25519 keys",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",

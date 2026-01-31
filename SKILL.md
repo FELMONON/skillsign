@@ -1,7 +1,7 @@
 ---
 name: skillsign
-version: 1.0.0
-description: Sign and verify agent skill folders with ed25519 keys. Detect tampering, manage trusted authors, and track provenance chains (isnād).
+version: 1.1.0
+description: Sign and verify agent skill folders with ed25519 keys. Detect tampering, manage trusted authors, revoke compromised keys, and track provenance chains (isnād).
 ---
 
 # skillsign
@@ -36,7 +36,7 @@ Hashes every file (SHA-256), builds a manifest, signs it with your private key. 
 ```bash
 python3 skillsign.py verify ./my-skill/
 ```
-Detects modified, added, or removed files. Verifies the cryptographic signature. Shows whether the signer is trusted.
+Detects modified, added, or removed files. Verifies the cryptographic signature. Checks if the signer has been revoked. Shows whether the signer is trusted.
 
 ### Inspect signature metadata
 ```bash
@@ -61,12 +61,27 @@ python3 skillsign.py chain ./my-skill/
 ```
 Shows the full signing history — every author who signed the folder, in order.
 
+### Revoke a compromised key
+```bash
+python3 skillsign.py revoke --key ~/.skillsign/keys/myagent.pem
+python3 skillsign.py revoke --key ~/.skillsign/keys/myagent.pem --reason "Key leaked"
+```
+Creates a self-signed revocation statement. Automatically removes the key from trusted authors. After revocation:
+- Signatures made **after** revocation → rejected by verify
+- Signatures made **before** revocation → pass with a warning
+
+### List revoked keys
+```bash
+python3 skillsign.py revoked
+```
+
 ## When to Use
 
 - **After installing a new skill** — verify it hasn't been tampered with
 - **Before running untrusted code** — check who signed it and whether you trust them
 - **Periodically** — re-verify your skill folders to detect unauthorized modifications
 - **When publishing skills** — sign your work so others can verify it came from you
+- **When a key is compromised** — revoke it immediately to prevent abuse
 - **When auditing your agent's integrity** — run verify on all your skill folders
 
 ## Example Workflow
@@ -93,8 +108,9 @@ python3 skillsign.py trust ./other-agent.pub
 
 # View full provenance
 python3 skillsign.py chain ~/.openclaw/skills/my-skill/
-# === Isnād: my-skill/ (2 links) ===
-#   [1] ca3458e92b73e432 [TRUSTED]
-#       ↓
-#   [2] f69159d8a25e8e32 [UNTRUSTED]
+
+# Key compromised? Revoke it:
+python3 skillsign.py revoke --key ~/.skillsign/keys/parker.pem --reason "Key leaked"
+# 🔴 Revoked: ca3458e92b73e432
+#    Signatures made after this timestamp will fail verification.
 ```

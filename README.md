@@ -10,8 +10,9 @@ AI agents install skills from shared registries. But there's no way to verify:
 - **Who wrote a skill** — Is this really from the author it claims?
 - **Has it been modified** — Did someone inject malicious code after publishing?
 - **Do I trust this author** — Should my agent run this code?
+- **Has a key been compromised** — Is this signer still trustworthy?
 
-`skillsign` answers all three. It creates a cryptographic chain of trust for agent skills.
+`skillsign` answers all four. It creates a cryptographic chain of trust for agent skills.
 
 ## Install
 
@@ -81,12 +82,13 @@ Hashes every file in the folder (SHA-256), builds a sorted manifest, and signs i
 python3 skillsign.py verify ./my-skill/
 ```
 
-Rebuilds the manifest from current files, compares to the stored manifest, then verifies the cryptographic signature. Detects:
+Rebuilds the manifest from current files, compares to the stored manifest, then verifies the cryptographic signature. Also checks the signer's revocation status. Detects:
 
 - **Modified files:** `~ psych.py (modified)`
 - **Added files:** `+ backdoor.py (added)`
 - **Removed files:** `- config.json (removed)`
 - **Forged signatures:** `INVALID SIGNATURE`
+- **Revoked signers:** `REVOKED — Signer was revoked`
 
 **Clean output:**
 ```
@@ -100,6 +102,21 @@ Rebuilds the manifest from current files, compares to the stored manifest, then 
 ❌ TAMPERED — Files changed since signing:
    ~ psych.py (modified)
    + backdoor.py (added)
+```
+
+**Revoked signer (post-revocation signature):**
+```
+🔴 REVOKED — Signer f69159d8a25e8e32 was revoked.
+   Revoked at: 2026-01-31T04:22:46Z
+   Reason: Key compromised
+   Signatures after revocation are not trustworthy.
+```
+
+**Revoked signer (pre-revocation signature):**
+```
+✅ Verified — 14 files intact.
+   Signer: f69159d8a25e8e32 [TRUSTED]
+   ⚠️  Signer was later revoked (2026-01-31T04:22:46Z), but this signature predates revocation.
 ```
 
 ### `inspect` — View signature metadata
@@ -116,7 +133,7 @@ Shows signer fingerprint, timestamp, file count, and all covered files with thei
   Signer:     f69159d8a25e8e32 [TRUSTED]
   Signed at:  2026-01-31T03:09:53Z
   Files:      14
-  Tool:       skillsign v1.0.0
+  Tool:       skillsign v1.1.0
 
   Files covered:
     SKILL.md: 4057c61a9989...
@@ -166,6 +183,40 @@ Shows the full signing history. Each time a folder is re-signed (by the same or 
       Files:  14
 ```
 
+### `revoke` — Revoke a signing key
+
+```bash
+python3 skillsign.py revoke --key ~/.skillsign/keys/alice.pem
+python3 skillsign.py revoke --key ~/.skillsign/keys/alice.pem --reason "Key leaked"
+```
+
+Creates a self-signed revocation statement (proof of key ownership) and stores it locally. Automatically removes the key from your trusted authors list. After revocation:
+- Signatures made **after** the revocation timestamp are rejected by `verify`
+- Signatures made **before** revocation still pass, with a warning
+
+**Output:**
+```
+🔴 Revoked: f69159d8a25e8e32
+   Removed from trusted authors.
+   Reason: Key leaked
+   Time: 2026-01-31T04:22:46Z
+   Signatures made after this timestamp will fail verification.
+```
+
+### `revoked` — List all revoked keys
+
+```bash
+python3 skillsign.py revoked
+```
+
+**Output:**
+```
+=== Revoked Keys (1) ===
+  f69159d8a25e8e32
+    Revoked: 2026-01-31T04:22:46Z
+    Reason:  Key leaked
+```
+
 ## How It Works
 
 1. **`sign`** walks the skill folder, computes SHA-256 hashes for every file, builds a canonical JSON manifest, and signs it with your ed25519 private key
@@ -174,8 +225,9 @@ Shows the full signing history. Each time a folder is re-signed (by the same or 
    - `signature.bin` — ed25519 signature of the manifest
    - `signer.json` — author metadata and public key
    - `chain.json` — provenance chain (isnād)
-3. **`verify`** rebuilds the manifest from current files, compares it to the stored manifest, then verifies the cryptographic signature against the embedded public key
+3. **`verify`** rebuilds the manifest from current files, compares it to the stored manifest, verifies the cryptographic signature, and checks if the signer has been revoked
 4. **Trust** is explicit and local — you choose which public keys to trust via the `trust` command
+5. **Revocation** is timestamp-aware — pre-compromise signatures remain valid, post-compromise signatures are rejected
 
 ## File Structure
 
@@ -194,9 +246,11 @@ my-skill/
 ├── keys/
 │   ├── default.pem    # Your private key (never share)
 │   └── default.pub    # Your public key (share freely)
-└── trusted/
-    ├── f69159d8...pub # Trusted author keys
-    └── c312dd1b...pub
+├── trusted/
+│   ├── f69159d8...pub # Trusted author keys
+│   └── c312dd1b...pub
+└── revoked/
+    └── f69159d8...json # Revocation statements
 ```
 
 ## Security Model
@@ -205,11 +259,13 @@ my-skill/
 - **SHA-256** — Industry-standard file hashing. Collision-resistant.
 - **Canonical JSON** — Manifests are serialized deterministically (sorted keys, no whitespace) so the same files always produce the same signature.
 - **Local trust** — No central authority. You decide who to trust. This is a feature, not a limitation.
+- **Timestamp-aware revocation** — Revoked keys don't invalidate all prior work. Only post-compromise signatures are rejected.
+- **Self-signed revocations** — Only the key owner can revoke their key (proof of ownership via signature).
 
 ## Limitations
 
-- No key revocation (yet). If a private key is compromised, you need to manually remove the corresponding `.pub` from `~/.skillsign/trusted/`.
-- No timestamping authority. Signing timestamps are self-reported.
+- No distributed revocation lists (yet). Revocations are local — you need to manually share revocation statements with other agents.
+- No timestamping authority. Signing and revocation timestamps are self-reported.
 - Chain doesn't prevent a malicious re-signer from rewriting history (future: hash-linked chains).
 
 ## License
